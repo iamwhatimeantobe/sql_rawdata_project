@@ -1,0 +1,242 @@
+CREATE TABLE dec19(    
+event_time TEXT,
+event_type TEXT,
+product_id TEXT,
+category_id BIGINT,
+category_code TEXT,
+brand TEXT,
+price DECIMAL(10,2),
+user_id TEXT,
+user_session TEXT
+);
+
+LOAD DATA INFILE '/Users/gani/Downloads/2019-Dec.csv' 
+INTO TABLE ecommerce_db.dec19
+CHARACTER SET euckr
+FIELDS TERMINATED BY ','
+LINES TERMINATED BY '\n'
+IGNORE 1 ROWS
+(@event_time, @event_type, @product_id, @category_id, @category_code, @brand, @price, @user_id, @user_session)
+SET event_time = @event_time,
+	event_type = @event_type,
+    product_id = @product_id,
+    category_id = NULLIf(@category_id,''),
+    category_code = NULLIF(@category_code,''),
+    brand = NULLIf(@brand,''),
+    price = NULLIf(@price,''),
+    user_id = NULLIf(@user_id,''),
+    user_session = NULLIf(@user_session,'');
+
+-- 전체 행은 3,541,530개
+SELECT COUNT(event_time)
+FROM ecommerce_db.cosmetic_dec19;
+
+-- 고유 세션 수 839,865개
+SELECT COUNT(DISTINCT user_id, user_session)
+FROM cosmetic_dec19; 
+
+-- 유저 수 37만명
+SELECT COUNT(DISTINCT user_id)
+FROM dec19; 
+
+-- 판매 상품 평균 가격대
+SELECT ROUND(AVG(price),2) AS avg_price
+FROM (SELECT DISTINCT product_id, price
+FROM dec19) a;
+
+-- 입점된 브랜드 수
+SELECT COUNT(DISTINCT brand)
+FROM dec19;
+
+
+-- 가장 많이 판매되는 카테고리 '1487580005092295511', code는 모름 
+SELECT category_id, COUNT(DISTINCT user_session) AS session_cnt
+FROM dec19
+WHERE event_type = 'purchase'
+GROUP BY category_id
+ORDER BY session_cnt DESC
+LIMIT 1 ;
+
+SELECT *
+FROM dec19
+WHERE category_id = '1487580005092295511'
+	AND (category_code IS NOT NULL
+    OR brand IS NOT NULL);
+    
+-- 카테고리는 10개 밖에 없음 
+SELECT DISTINCT category_code
+FROM cosmetic_dec19;
+
+-- 테이블 이름 바꾸기 
+-- ALTER TABLE `ecommerce_db`.`dec19` 
+-- RENAME TO  `ecommerce_db`.`2019dec`;
+
+SELECT *
+FROM ecommerce_db.dec19
+LIMIT 10;
+
+-- 주차별 구매 세션 수, 상품 개수
+WITH weekly AS(
+	SELECT *
+		, DATE_FORMAT(event_time, '%Y-%m-%d') AS event_date
+		, WEEK(DATE_FORMAT(event_time, '%Y-%m-%d')) AS week
+	FROM dec19
+)
+SELECT week
+	, COUNT(product_id) AS product_cnt
+	, COUNT(DISTINCT user_id, user_session) AS session_cnt
+FROM weekly
+WHERE event_type = 'purchase'
+GROUP BY week
+ORDER BY week;
+
+-- 주차별 판매액
+WITH weekly AS(
+	SELECT *
+		, DATE_FORMAT(event_time, '%Y-%m-%d') AS event_date
+		, WEEK(DATE_FORMAT(event_time, '%Y-%m-%d')) AS week
+	FROM dec19
+)
+SELECT week, SUM(price) AS sales
+FROM weekly
+WHERE event_type = 'purchase'
+GROUP BY week
+ORDER BY week;
+
+-- 고객별 구매 횟수 1.12회
+WITH cnt AS (
+	SELECT user_id
+		, COUNT(DISTINCT user_id, user_session) AS purchase_cnt
+	FROM dec19
+	WHERE event_type = 'purchase'
+	GROUP BY user_id
+)
+SELECT AVG(purchase_cnt) AS avg_cnt
+FROM cnt ;
+
+-- 전체 세션 수 대비 구매 세션 수 비율
+SELECT COUNT(DISTINCT user_id, user_session) / (SELECT COUNT(DISTINCT user_id, user_session) FROM dec19) AS purchase_rate
+FROM dec19
+WHERE event_type = 'purchase';
+
+SELECT *
+FROM dec19
+WHERE user_id = '150318419';
+
+SELECT DISTINCT category_id
+FROM dec19;
+
+SELECT COUNT(DISTINCT event_time, event_type, category_id, product_id, brand, price, user_id, user_session)
+FROM dec19;
+
+SELECT COUNT(user_id)
+FROM dec19;
+
+-- view, cart, purchase/remove_from_cart 비율 살펴보기 
+-- 에러코드 2013. 서버 연결 끊김
+WITH vt AS (
+	SELECT user_id, user_session, event_time
+	FROM dec19 
+	WHERE event_type = 'view'
+), ct AS (
+	SELECT user_id, user_session, event_time
+	FROM dec19
+	WHERE event_type = 'cart'
+), pt AS (
+	SELECT user_id, user_session, event_time
+	FROM dec19
+	WHERE event_type = 'purchase'
+), rt AS (
+	SELECT user_id, user_session, event_time
+	FROM dec19
+	WHERE event_type = 'remove_from_cart'
+)    
+SELECT COUNT(DISTINCT vt.user_id, vt.user_session) AS view_count
+ 	, COUNT(DISTINCT ct.user_id, ct.user_session) AS cart_count
+    , COUNT(DISTINCT rt.user_id, rt.user_session) AS remove_count
+    , COUNT(DISTINCT ct.user_id, ct.user_session) / COUNT(DISTINCT vt.user_id, vt.user_session) AS view_cart_ratio
+    , COUNT(DISTINCT rt.user_id, rt.user_session) / COUNT(DISTINCT ct.user_id, ct.user_session) AS cart_remove_ratio
+	, COUNT(DISTINCT rt.user_id, rt.user_session) / COUNT(DISTINCT vt.user_id, vt.user_session) AS view_remove_ratio
+FROM vt
+LEFT JOIN ct ON vt.user_id = ct.user_id
+		AND vt.user_session = ct.user_session
+        AND vt.event_time <= ct.event_time
+LEFT JOIN rt ON ct.user_id = rt.user_id
+		AND ct.user_session = rt.user_session
+        AND ct.event_time <= rt.event_time;
+
+# 소비자 단순 변심 → 유저 별로 “cart”, “remove cart”가 반복되는지 확인하기
+# remove_from_cart를 한적이 있는 고객을 이벤트 순서대로 확인
+# -> 확인하기 어려움 
+SELECT *
+FROM dec19
+WHERE (user_id, user_session) IN (SELECT DISTINCT user_id, user_session
+								FROM dec19
+								WHERE event_type = 'remove_from_cart')
+ORDER BY user_id, event_time;
+
+# 특정 브랜드의 이슈나 문제로 인해 발생 -> remove_from_cart의 브랜드 별로 수를 세어보기
+WITH removed AS (
+	SELECT brand, COUNT(product_id) AS removed_cnt
+	FROM dec19
+	WHERE event_type = 'remove_from_cart'
+	GROUP BY brand
+	ORDER BY removed_cnt DESC
+), cart AS (
+	SELECT brand, COUNT(product_id) AS cart_cnt
+	FROM dec19
+	WHERE event_type = 'cart'
+	GROUP BY brand
+	ORDER BY cart_cnt DESC
+), purchased AS (
+	SELECT brand, COUNT(product_id) AS purchased_cnt
+	FROM dec19
+	WHERE event_type = 'purchase'
+	GROUP BY brand
+	ORDER BY purchased_cnt DESC
+)
+SELECT cart.brand
+	, cart_cnt
+    , removed_cnt
+    , ROUND(removed_cnt/cart_cnt,2) AS removed_rate
+    , purchased_cnt
+    , ROUND(purchased_cnt/cart_cnt,2) AS purchased_rate
+FROM cart LEFT JOIN removed 
+			ON cart.brand = removed.brand
+		LEFT JOIN purchased
+			ON purchased.brand = cart.brand
+WHERE cart.brand IS NOT NULL
+ORDER BY cart_cnt DESC;
+
+# 불편한 UI로 인해 불필요한 remove_from_cart 이벤트 발생 
+# -> 동일 유저가 카트에 담았던 물건을 카트에서 뺐다가 결국 구매한 수 / 비율 확인해보기
+WITH removed_item AS (
+	SELECT product_id, user_id
+	FROM dec19
+	WHERE event_type = 'remove_from_cart'
+)
+SELECT COUNT(product_id) AS finally_purchased_cnt
+	, (SELECT COUNT(product_id) FROM dec19 WHERE event_type = 'purchase') AS total_purchased_cnt
+    , (COUNT(product_id) / (SELECT COUNT(product_id) FROM dec19 WHERE event_type = 'purchase')) AS f_p_rate
+FROM dec19 
+WHERE event_type = 'purchase' 
+	AND (product_id, user_id) IN (SELECT * FROM removed_item);
+    
+-- 일 별 remove cart 수 확인해보고 튀는 값 확인해보기 
+SELECT DATE_FORMAT(event_time, '%Y-%m-%d') AS 'day'
+	, COUNT(product_id) AS removed_cnt
+FROM dec19
+WHERE event_type = 'remove_from_cart'
+GROUP BY day;
+
+SELECT DAYNAME(event_time) AS day
+	, COUNT(product_id) AS removed_cnt
+FROM dec19
+WHERE event_type = 'remove_from_cart'
+GROUP BY day;
+
+SELECT DAYNAME(event_time) AS day
+	, COUNT(DISTINCT user_id, user_session) AS session_cnt
+FROM dec19
+GROUP BY day
+ORDER BY day;
